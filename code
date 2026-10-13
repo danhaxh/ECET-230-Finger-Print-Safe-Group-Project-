@@ -1,0 +1,413 @@
+#include <Adafruit_Fingerprint.h>
+#include <SoftwareSerial.h>
+#include <Servo.h>
+
+// ---------------- PINS ----------------
+#define GREEN_LED 6
+#define RED_LED   7
+#define SERVO_PIN 9
+
+// Fingerprint:
+// Sensor TX -> Arduino D2
+// Sensor RX -> Arduino D3
+SoftwareSerial fingerSerial(2, 3);
+
+Adafruit_Fingerprint finger = Adafruit_Fingerprint(&fingerSerial);
+
+Servo lockServo;
+
+// ---------------- SERVO SETTINGS ----------------
+const int LOCKED_POSITION = 0;
+const int UNLOCKED_POSITION = 90;
+
+const int UNLOCK_TIME = 3000;
+
+
+// =================================================
+// SETUP
+// =================================================
+
+void setup() {
+
+  Serial.begin(9600);
+
+  pinMode(GREEN_LED, OUTPUT);
+  pinMode(RED_LED, OUTPUT);
+
+  digitalWrite(GREEN_LED, LOW);
+  digitalWrite(RED_LED, LOW);
+
+  lockServo.attach(SERVO_PIN);
+  lockServo.write(LOCKED_POSITION);
+
+  // Fingerprint sensor communicates at 57600 baud
+  finger.begin(57600);
+
+  delay(100);
+
+  if (finger.verifyPassword()) {
+    Serial.println("Fingerprint sensor connected!");
+  }
+  else {
+    Serial.println("ERROR: Fingerprint sensor not found!");
+
+    while (1) {
+      digitalWrite(RED_LED, HIGH);
+      delay(500);
+      digitalWrite(RED_LED, LOW);
+      delay(500);
+    }
+  }
+
+  Serial.println();
+  Serial.println("========== FINGERPRINT SAFE ==========");
+  Serial.println("Safe is ready.");
+  Serial.println();
+  Serial.println("To enroll a fingerprint:");
+  Serial.println("Type: E 1");
+  Serial.println("Change 1 to whatever ID you want.");
+  Serial.println("Example: E 2");
+  Serial.println("======================================");
+  Serial.println();
+}
+
+
+// =================================================
+// MAIN LOOP
+// =================================================
+
+void loop() {
+
+  // ------------------------------------------------
+  // CHECK SERIAL MONITOR FOR COMMANDS
+  // ------------------------------------------------
+
+  if (Serial.available() > 0) {
+
+    char command = Serial.read();
+
+    // ENROLL COMMAND
+    if (command == 'E' || command == 'e') {
+
+      int id = Serial.parseInt();
+
+      if (id > 0 && id <= 127) {
+
+        Serial.print("Starting enrollment for ID #");
+        Serial.println(id);
+
+        enrollFingerprint(id);
+      }
+      else {
+
+        Serial.println("Invalid ID.");
+        Serial.println("Use an ID from 1 to 127.");
+      }
+
+      clearSerialBuffer();
+    }
+  }
+
+
+  // ------------------------------------------------
+  // NORMAL SAFE OPERATION
+  // ------------------------------------------------
+
+  int fingerprintResult = checkFingerprint();
+
+
+  // GOOD FINGERPRINT
+  if (fingerprintResult == 1) {
+
+    Serial.println();
+    Serial.println("ACCESS GRANTED");
+
+    digitalWrite(RED_LED, LOW);
+    digitalWrite(GREEN_LED, HIGH);
+
+    // Unlock safe
+    lockServo.write(UNLOCKED_POSITION);
+
+    delay(UNLOCK_TIME);
+
+    // Lock safe
+    lockServo.write(LOCKED_POSITION);
+
+    digitalWrite(GREEN_LED, LOW);
+
+    Serial.println("Safe locked.");
+
+    // Prevent same finger from immediately triggering again
+    waitForFingerRemoval();
+  }
+
+
+  // BAD / UNKNOWN FINGERPRINT
+  else if (fingerprintResult == -1) {
+
+    Serial.println();
+    Serial.println("ACCESS DENIED");
+
+    digitalWrite(GREEN_LED, LOW);
+    digitalWrite(RED_LED, HIGH);
+
+    delay(1500);
+
+    digitalWrite(RED_LED, LOW);
+
+    waitForFingerRemoval();
+  }
+}
+
+
+// =================================================
+// CHECK FINGERPRINT
+// =================================================
+
+int checkFingerprint() {
+
+  uint8_t p;
+
+  // Take fingerprint image
+  p = finger.getImage();
+
+  // Nobody touching sensor
+  if (p == FINGERPRINT_NOFINGER) {
+    return 0;
+  }
+
+  // Failed to capture image
+  if (p != FINGERPRINT_OK) {
+
+    Serial.println("Could not read fingerprint.");
+    return -1;
+  }
+
+
+  // Convert fingerprint image into fingerprint data
+  p = finger.image2Tz();
+
+  if (p != FINGERPRINT_OK) {
+
+    Serial.println("Fingerprint image unclear.");
+    return -1;
+  }
+
+
+  // Search stored fingerprints
+  p = finger.fingerFastSearch();
+
+  if (p == FINGERPRINT_OK) {
+
+    Serial.print("Fingerprint matched ID #");
+    Serial.println(finger.fingerID);
+
+    Serial.print("Confidence: ");
+    Serial.println(finger.confidence);
+
+    return 1;
+  }
+
+
+  if (p == FINGERPRINT_NOTFOUND) {
+
+    Serial.println("Fingerprint not recognized.");
+    return -1;
+  }
+
+
+  Serial.println("Fingerprint sensor error.");
+
+  return -1;
+}
+
+
+// =================================================
+// ENROLL A NEW FINGERPRINT
+// =================================================
+
+void enrollFingerprint(uint8_t id) {
+
+  uint8_t p = -1;
+
+  Serial.println();
+  Serial.print("ENROLLING ID #");
+  Serial.println(id);
+
+  Serial.println();
+  Serial.println("Place finger on sensor...");
+
+
+  // ------------------------------------------------
+  // FIRST SCAN
+  // ------------------------------------------------
+
+  while (p != FINGERPRINT_OK) {
+
+    p = finger.getImage();
+
+    if (p == FINGERPRINT_OK) {
+
+      Serial.println("First image captured!");
+    }
+
+    else if (p == FINGERPRINT_NOFINGER) {
+
+      // Keep waiting
+    }
+
+    else {
+
+      Serial.println("Error capturing fingerprint.");
+    }
+  }
+
+
+  // Convert first image
+  p = finger.image2Tz(1);
+
+  if (p != FINGERPRINT_OK) {
+
+    Serial.println("Could not process first fingerprint image.");
+    return;
+  }
+
+
+  // ------------------------------------------------
+  // REMOVE FINGER
+  // ------------------------------------------------
+
+  Serial.println();
+  Serial.println("Remove finger...");
+
+  delay(1000);
+
+  while (finger.getImage() != FINGERPRINT_NOFINGER) {
+    delay(50);
+  }
+
+
+  // ------------------------------------------------
+  // SECOND SCAN
+  // ------------------------------------------------
+
+  Serial.println();
+  Serial.println("Place SAME finger on sensor again...");
+
+  p = -1;
+
+  while (p != FINGERPRINT_OK) {
+
+    p = finger.getImage();
+
+    if (p == FINGERPRINT_OK) {
+
+      Serial.println("Second image captured!");
+    }
+
+    else if (p == FINGERPRINT_NOFINGER) {
+
+      // Keep waiting
+    }
+
+    else {
+
+      Serial.println("Error capturing second fingerprint.");
+    }
+  }
+
+
+  // Convert second image
+  p = finger.image2Tz(2);
+
+  if (p != FINGERPRINT_OK) {
+
+    Serial.println("Could not process second fingerprint image.");
+    return;
+  }
+
+
+  // ------------------------------------------------
+  // COMPARE BOTH SCANS
+  // ------------------------------------------------
+
+  Serial.println();
+  Serial.println("Comparing fingerprints...");
+
+  p = finger.createModel();
+
+  if (p == FINGERPRINT_OK) {
+
+    Serial.println("Fingerprints match!");
+  }
+
+  else if (p == FINGERPRINT_ENROLLMISMATCH) {
+
+    Serial.println("ERROR: The two fingerprints did not match.");
+    Serial.println("Try enrolling again.");
+
+    return;
+  }
+
+  else {
+
+    Serial.println("Error creating fingerprint model.");
+
+    return;
+  }
+
+
+  // ------------------------------------------------
+  // SAVE FINGERPRINT
+  // ------------------------------------------------
+
+  p = finger.storeModel(id);
+
+  if (p == FINGERPRINT_OK) {
+
+    Serial.println();
+    Serial.println("==============================");
+    Serial.print("SUCCESS! Fingerprint stored as ID #");
+    Serial.println(id);
+    Serial.println("==============================");
+  }
+
+  else {
+
+    Serial.println("ERROR: Could not save fingerprint.");
+  }
+
+
+  waitForFingerRemoval();
+
+  Serial.println();
+  Serial.println("Safe is ready.");
+}
+
+
+// =================================================
+// WAIT UNTIL FINGER IS REMOVED
+// =================================================
+
+void waitForFingerRemoval() {
+
+  while (finger.getImage() != FINGERPRINT_NOFINGER) {
+
+    delay(50);
+  }
+
+  delay(200);
+}
+
+
+// =================================================
+// CLEAR SERIAL INPUT
+// =================================================
+
+void clearSerialBuffer() {
+
+  while (Serial.available() > 0) {
+
+    Serial.read();
+  }
+}
